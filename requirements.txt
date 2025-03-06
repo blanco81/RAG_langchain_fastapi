@@ -1,0 +1,47 @@
+# Servidor API y dependencias web asíncronas
+fastapi==0.95.2
+uvicorn[standard]==0.22.0
+aiofiles==23.1.0
+
+# Gestión de base de datos con SQLAlchemy 2.x y operaciones asíncronas
+sqlalchemy==2.0.38
+sqlalchemy_utils
+asyncpg==0.27.0
+databases>=0.9.0
+
+# Migraciones de base de datos
+alembic
+
+# Variables de entorno
+python-dotenv==1.0.0
+
+# Procesamiento de PDFs
+PyPDF2==3.0.1
+
+# Lenguajes y cadenas de inferencia
+langchain>=0.1.0
+
+# Base de datos vectorial (ChromaDB)
+chromadb==0.3.20
+
+# Integración con Groq y OpenAI
+groq==0.11.0
+openai==0.27.0
+
+# Modelos de embeddings (HuggingFace)
+sentence-transformers==2.2.2
+
+# Otros
+python-jose==3.3.0
+nanoid==2.0.0
+pytz==2023.3
+requests==2.31.0
+cryptography
+itsdangerous
+pydantic[email]
+langchain-community
+python-multipart
+tiktoken
+httpx==0.27.2
+pgvector
+qdrant-client
