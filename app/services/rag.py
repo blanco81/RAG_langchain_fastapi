@@ -2,9 +2,9 @@ from datetime import datetime
 import aiofiles
 import io
 import PyPDF2
-import openai
 import pytz
 import uuid
+from groq import Groq
 from typing import List
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -15,6 +15,17 @@ from app.core.config import settings
 from app.models.logger import Logger
 from app.models.rag import Document, History
 from langchain.memory import ConversationBufferMemory
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+groq_api_key = settings.GROQ_API_KEY
+
+if groq_api_key is None:
+    raise ValueError("GROQ_API_KEY não está definido. Por favor, verifique o seu .env file.")
+
+client = Groq(api_key=groq_api_key)
+
+qdrant_client = QdrantClient(settings.QDRANT_URL)
+COLLECTION_NAME = "documents"
 
 
 def validate_or_generate_uuid(doc_id: str) -> str:
@@ -22,9 +33,6 @@ def validate_or_generate_uuid(doc_id: str) -> str:
         return str(uuid.UUID(doc_id))
     except ValueError:
         return str(uuid.uuid4())
-
-qdrant_client = QdrantClient(settings.QDRANT_URL)
-COLLECTION_NAME = "documents"
 
 try:
     qdrant_client.get_collection(COLLECTION_NAME)
@@ -34,16 +42,51 @@ except:
         vectors_config={"size": 384, "distance": "Cosine"}  # Ajusta el tamaño según el modelo de embeddings
     )
 
-# --- Cargar modelo de embeddings ---
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
-# Memoria de conversación de LangChain
 memory = ConversationBufferMemory()
 
 # ---------------------------
 # Funciones de Memoria
 # ---------------------------
-async def add_memory(user_id: str, user_input: str, bot_response: str, db: AsyncSession):
+
+text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=1000,  # Tamaño máximo de cada chunk (en caracteres)
+    chunk_overlap=200,  # Solapamiento entre chunks (opcional)
+    length_function=len,  # Función para calcular la longitud del texto
+    separators=["\n\n", "\n", " ", ""]  # Separadores para dividir el texto
+)
+
+def split_text_into_chunks(text: str) -> List[str]:
+    chunks = text_splitter.split_text(text)
+    return chunks
+
+
+async def summarize_memory(history: str) -> str:
+    if not history:
+        return ""
+
+    prompt_summary = f"""
+    Resuma la siguinte conversación de manera concisa, manteniendo el contexto principal:
+
+    {history}
+
+    Resumen:
+    """
+
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "system", "content": prompt_summary}],
+        max_tokens=100,  # Limitando o resumo a 100 tokens
+        temperature=0.3
+    )
+    return response.choices[0].message.content.strip()
+
+
+
+
+async def add_memory(user_id: str, user_input: str, bot_response: str, db: AsyncSession):    
+    #summarized_history = await summarize_memory(bot_response)  # Resumo do histórico    
     history_entry = History(
         query_text=user_input,
         response_text=bot_response,
@@ -57,7 +100,7 @@ async def get_memory(user_id: str, db: AsyncSession) -> str:
         select(History.query_text, History.response_text, History.created_at)
         .where(History.user_id == user_id)
         .order_by(History.created_at.desc())
-        .limit(10)
+        .limit(5)
     )
     result = await db.execute(stmt)
     history_data = result.fetchall()
@@ -91,41 +134,47 @@ async def store_embedding(
     db: AsyncSession, 
     doc_id: str, 
     text_content: str, 
-    content_hash: str, 
     filename: str, 
     user_id: str
-    ):
+):
     print(f"📥 Guardando documento en Qdrant - ID: {doc_id}")
     
-    valid_id = validate_or_generate_uuid(doc_id)
-
-    embedding = embedding_model.encode(text_content).tolist()
+    chunks = split_text_into_chunks(text_content)
     
-    qdrant_client.upsert(
-        collection_name=COLLECTION_NAME,
-        points=[
-            PointStruct(
-                id=valid_id,
-                vector=embedding,
-                payload={"text": text_content, "filename": filename, "user_id": user_id, "upload_date": str(datetime.now(pytz.utc))}
-            )
-        ]
-    )
-    
-    document = Document(
-            id=doc_id,
+    for i, chunk in enumerate(chunks):
+        chunk_id = str(uuid.uuid4())
+        
+        embedding = embedding_model.encode(chunk).tolist()
+        
+        qdrant_client.upsert(
+            collection_name=COLLECTION_NAME,
+            points=[
+                PointStruct(
+                    id=chunk_id,
+                    vector=embedding,
+                    payload={
+                        "text": chunk,
+                        "filename": filename,
+                        "user_id": user_id,
+                        "upload_date": str(datetime.now(pytz.utc)),
+                        "chunk_index": i  
+                    }
+                )
+            ]
+        )        
+        document = Document(
+            id=chunk_id,
             filename=filename,
-            content_hash=content_hash,
             vector_data=embedding,
             user_id=user_id,
             upload_date=datetime.now(pytz.utc)
         )
-    db.add(document)
-    await db.commit()
-    await db.refresh(document)
+        db.add(document)
+        await db.commit()
+        await db.refresh(document)
     
     db_log = Logger(
-        action=f"Documento '{filename}' up-loaded.",
+        action=f"Documento '{filename}' up-loaded en {len(chunks)} chunks.",
         created_at=datetime.now(pytz.utc),
         user_id=user_id
     )
@@ -133,13 +182,13 @@ async def store_embedding(
     await db.commit()
     await db.refresh(db_log)
     
-    print(f"✅ Documento guardado en Qdrant con ID: {doc_id}")
+    print(f"✅ Documento guardado en Qdrant en {len(chunks)} chunks.")
     return document
 
 # ---------------------------
 # Consultar documentos más cercanos en base a embeddings
 # ---------------------------
-async def query_embedding(query_vector: List[float], top_k: int = 5):
+async def query_embedding(query_vector: List[float], top_k: int = 3):
     print(f"🔍 Consultando documentos similares en Qdrant")
     
     search_results = qdrant_client.search(
@@ -159,20 +208,21 @@ async def query_embedding(query_vector: List[float], top_k: int = 5):
 # ---------------------------
 # Procesar consulta (RAG)
 # ---------------------------
-async def process_query(query: str, user_id: str, db: AsyncSession) -> str:
-    conversation_history = await get_memory(user_id, db)
 
+
+
+async def process_query(query: str, user_id: str, db: AsyncSession) -> str:
+    raw_history = await get_memory(user_id, db)  # Obtém histórico
+    #summarized_history = await summarize_memory(raw_history)  # Resumo do histórico
     is_date_related_query = any(keyword in query.lower() for keyword in ["fecha", "cuándo", "día", "momento"])
+   
 
     if is_date_related_query:
         prompt = f"""
-        Actúa como un asistente de inteligencia artificial especializado en análisis de documentos. 
-        Utiliza el siguiente historial de conversaciones para responder con precisión a la pregunta del usuario.
-        Utiliza un tono asequible, cordial y viable a la hora de responderle al usuario.
-        
+        Eres un asistente de IA especializado en documentos. Usa la información a continuación para responder.        
                 
-        **Historial de conversación:**
-        {conversation_history}
+        **Historial de conversación resumido:**
+        {raw_history}
         
         **Instrucción adicional:**
         - Si la pregunta está relacionada con fechas, responde indicando la fecha exacta en que se realizó la pregunta.
@@ -186,15 +236,11 @@ async def process_query(query: str, user_id: str, db: AsyncSession) -> str:
         results = await query_embedding(query_embedding_vector)
         context = " ".join(results["documents"]) or "Sin contexto adicional."
 
-        print("📄 Contexto recuperado:", context)
-
         prompt = f"""
-        Actúa como un asistente de inteligencia artificial especializado en análisis de documentos. 
-        Utiliza la siguiente información para responder con precisión a la pregunta del usuario.
-        Utiliza un tono asequible, cordial y viable a la hora de responderle al usuario.
+        Eres un asistente de IA especializado en documentos. Usa la información a continuación para responder.
         
-        **Historial de conversación:**
-        {conversation_history}
+        **Historial de conversación resumido:**
+        {raw_history}
 
         **Contexto relevante:**
         {context}
@@ -202,17 +248,15 @@ async def process_query(query: str, user_id: str, db: AsyncSession) -> str:
         **Pregunta:** {query}
         **Respuesta esperada:**
         """
-
-    openai.api_key = settings.OPENAI_API_KEY
-    
-    response = await openai.ChatCompletion.acreate(
-        model="gpt-4o-mini",
+        
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
         messages=[{"role": "system", "content": prompt}],
-        max_tokens=200,
-        temperature=0.6
+        max_tokens=600,
+        temperature=0.5
     )
 
-    assistant_response = response["choices"][0]["message"]["content"].strip()
+    assistant_response = response.choices[0].message.content.strip()
 
     await add_memory(user_id, query, assistant_response, db)
     

@@ -7,7 +7,6 @@ class QueryRequest(BaseModel):
 
 class DocumentBase(BaseModel):
     filename: str
-    content_hash: str
     vector_data: str
     user_id: str
 
@@ -17,7 +16,6 @@ class DocumentCreate(DocumentBase):
 class DocumentResponse(BaseModel):
     id: str
     filename: str
-    content_hash: str
     user_id: str
     upload_date: datetime
     deleted: bool

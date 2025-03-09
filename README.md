@@ -8,7 +8,8 @@ Este microservicio implementa un sistema de Recuperación Aumentada Generativa (
 - **Qdrant** como base de datos vectorial
 - **SentenceTransformers** para embeddings
 - **LangChain** para memoria conversacional
-- **OpenAI GPT-4o-mini** para generación de respuestas
+- **llama-3.3-70b-versatile** para generación de respuestas
+- **Groq** para ejecutar LLM
 
 ## Configuración
 ### Variables de Entorno

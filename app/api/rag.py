@@ -1,5 +1,4 @@
 import aiofiles
-import hashlib
 import os
 from nanoid import generate
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, status
@@ -20,8 +19,7 @@ from app.core.dependencies import get_current_user
 from app.services.rag import (
     extract_text_from_pdf,
     process_query,
-    store_embedding,  # Ahora ajustada para recibir (doc_id, text, embedding)
-    embedding_model
+    store_embedding
 )
 
 router = APIRouter()
@@ -44,17 +42,10 @@ async def upload_document(
 ):
     try:
         if current_user.role not in ["Admin", "User"]:
-            raise HTTPException(status_code=403, detail="No tiene permisos para realizar esta acción.")
-        
+            raise HTTPException(status_code=403, detail="No tiene permisos para realizar esta acción.")        
         if file.content_type != "application/pdf":
-            raise HTTPException(status_code=400, detail="El archivo debe ser un PDF.")
-        
-        content = await file.read()
-        content_hash = hashlib.sha256(content).hexdigest()
-        
-        existing = await db.execute(select(Document).where(Document.content_hash == content_hash))
-        if existing.scalar():
-            raise HTTPException(status_code=400, detail="El documento ya existe.")
+            raise HTTPException(status_code=400, detail="El archivo debe ser un PDF.")        
+        content = await file.read()       
         
         temp_file_path = f"/tmp/{file.filename}"
         async with aiofiles.open(temp_file_path, "wb") as f:
@@ -62,7 +53,7 @@ async def upload_document(
         
         text = await extract_text_from_pdf(temp_file_path)        
         doc_id = generate()        
-        document = await store_embedding(db, doc_id, text, content_hash, file.filename, current_user.id)        
+        document = await store_embedding(db, doc_id, text, file.filename, current_user.id)        
         os.remove(temp_file_path)
         
         return document
